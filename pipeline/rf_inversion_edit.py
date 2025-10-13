@@ -13,6 +13,8 @@ from pipeline.common import RFEditingFluxPipeline
 
 
 class RFInversionEditFluxPipeline(RFEditingFluxPipeline):
+    """Modified from https://github.com/huggingface/diffusers/blob/main/examples/community/pipeline_flux_rf_inversion.py"""
+
     def get_timesteps(self, num_inference_steps, strength=1.0):
         init_timestep = min(num_inference_steps * strength, num_inference_steps)
 

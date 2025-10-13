@@ -159,7 +159,6 @@ class FTEditFluxPipeline(RFEditingFluxPipeline):
         joint_attention_kwargs: dict[str, Any] | None = None,
         height: int | None = None,
         width: int | None = None,
-        clear_memory: bool = True,
         callback_on_step_end: Callable[[int, int, dict], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],  # noqa: B006
     ):
@@ -250,6 +249,11 @@ class FTEditFluxPipeline(RFEditingFluxPipeline):
             callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
         )
         register_norm_control_flux(self, None)
+        for processor in self.processors.values():
+            if hasattr(processor, "controller"):
+                processor.controller.cur_step = 0
+                processor.controller.cur_layer = 0
+        del latent_list
 
         if output_type == "latent":
             image = latents
@@ -341,7 +345,7 @@ class FTEditFluxPipeline(RFEditingFluxPipeline):
             device=device,
             joint_attention_kwargs=joint_attention_kwargs,
             inverse=False,
-            fixed_point_steps=3,
+            fixed_point_steps=fixed_point_steps,
             callback_on_step_end=callback_on_step_end,
             callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
         )
@@ -383,15 +387,11 @@ class FTEditFluxPipeline(RFEditingFluxPipeline):
         width: int | None = None,
         output_type: str | None = "pil",
         return_dict: bool = True,
-        clear_memory: bool = True,
         callback_on_step_end: Callable[[int, int, dict], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],  # noqa: B006
     ):
         generate_images = []
         for target_prompt in prompt_sequence:
-            for processor in self.processors.values():
-                if hasattr(processor, "controller"):
-                    processor.controller.prompts = [source_prompt, target_prompt]
             image = self(
                 source_img,
                 source_prompt,
@@ -408,10 +408,10 @@ class FTEditFluxPipeline(RFEditingFluxPipeline):
                 fixed_point_steps=fixed_point_steps,
                 skip_steps=skip_steps,
                 ly_ratio=ly_ratio,
-                clear_memory=clear_memory,
                 callback_on_step_end=callback_on_step_end,
                 callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
             ).images[0]
+
             source_prompt = target_prompt
             source_img = image
             generate_images.append(image)
