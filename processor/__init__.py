@@ -1,3 +1,3 @@
-from .flux_img_attn_processor import FluxAttnProcessor2_0WithMemory
+from .flux_editing_attn_processor import FluxAttnProcessorWithMemory
 
-__all__ = ["FluxAttnProcessor2_0WithMemory"]
+__all__ = ["FluxAttnProcessorWithMemory"]
