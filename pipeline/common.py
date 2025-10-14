@@ -1,10 +1,12 @@
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler, FluxPipeline
+from diffusers.callbacks import PipelineCallback
 from diffusers.models import AutoencoderKL, FluxTransformer2DModel
 from diffusers.models.transformers.transformer_flux import FluxAttnProcessor
+from diffusers.pipelines import DiffusionPipeline
 from PIL import Image
 from transformers import (
     CLIPImageProcessor,
@@ -21,13 +23,13 @@ from processor import FluxAttnProcessorWithMemory
 def get_module_having_attn_processor(
     transformer: torch.nn.Module,
     target_processor: Callable,
-    before_layer: Optional[int] = None,
-    after_layer: Optional[int] = None,
+    before_layer: int | None = None,
+    after_layer: int | None = None,
     filter_name: list[str] | None = None,
     **target_processor_kwargs,
-) -> Dict[str, Union[FluxAttnProcessor, Callable]]:
+) -> dict[str, FluxAttnProcessor | Callable]:
     def _get_module_having_attn_processor_driver(
-        name: str, module: torch.nn.Module, res: Dict[str, Any], after_layer: Optional[int] = None
+        name: str, module: torch.nn.Module, res: dict[str, Any], after_layer: int | None = None
     ):
         if hasattr(module, "set_processor"):
             block_type = name.split(".", 1)[0]
@@ -57,8 +59,8 @@ def get_module_having_attn_processor(
 class ProcessorMixin:
     def add_processor(
         self,
-        after_layer: Optional[int] = None,
-        before_layer: Optional[int] = None,
+        after_layer: int | None = None,
+        before_layer: int | None = None,
         filter_name: str | list[str] | None = None,
         target_processor: Callable = FluxAttnProcessorWithMemory,
         **kwargs,
@@ -112,7 +114,7 @@ class RFEditingFluxPipeline(FluxPipeline, ProcessorMixin):
     @torch.inference_mode()
     def encode_img(
         self,
-        img: Union[torch.Tensor, np.ndarray, Image.Image, str],
+        img: torch.Tensor | np.ndarray | Image.Image | str,
         dtype: torch.dtype,
         target_size: tuple[int, int] | None = None,  # (width, height)
     ):
@@ -142,3 +144,42 @@ class RFEditingFluxPipeline(FluxPipeline, ProcessorMixin):
         latents = self.vae.config.scaling_factor * (latents - self.vae.config.shift_factor)
 
         return latents, image_ids, new_h, new_w, ori_height, ori_width
+
+
+class RecordInvForCallback(PipelineCallback):
+    def __init__(
+        self,
+        target_tensor_name: str = "latents",
+        target_key: list[str] = ["latents", "inverse"],  # noqa: B006
+    ):
+        self.record: dict[str, dict[int, torch.Tensor]] = {key: {} for key in ["inverse", "foward"]}
+        self.target_key = target_key
+        self.target_tensor_name = target_tensor_name
+        assert self.target_tensor_name in self.target_key, (
+            f"target_tensor_name {self.target_tensor_name} must be in {self.target_key}"
+        )
+
+    def callback_fn(
+        self,
+        pipeline: DiffusionPipeline,
+        step_index: int,
+        timestep: int,
+        callback_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        if isinstance(timestep, torch.Tensor):
+            timestep = int(timestep.item())
+
+        target = "inverse" if callback_kwargs["inverse"] else "foward"
+        target_tensor = callback_kwargs[self.target_tensor_name].clone()
+        self.record[target][timestep] = target_tensor.float().cpu()
+        return callback_kwargs
+
+    def __len__(self) -> int:
+        return len(self.record)
+
+    @property
+    def tensor_inputs(self) -> list[str]:
+        return self.target_key
+
+    def clear_record(self):
+        self.record = {key: {} for key in ["inverse", "foward"]}

@@ -12,7 +12,7 @@ from PIL import Image
 from pipeline.common import RFEditingFluxPipeline
 
 
-class RFVanillaFluxPipeline(RFEditingFluxPipeline):
+class DNAEditFluxPipeline(RFEditingFluxPipeline):
     def denoise(
         self,
         latents: torch.Tensor,
@@ -21,14 +21,20 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
         text_ids: torch.Tensor,
         latent_image_ids: torch.Tensor,
         guidance_scale: float,
-        inject_step: int,
         num_inference_steps: int,
+        start_timestep: int,
         device: torch.device,
         joint_attention_kwargs: dict[str, Any] | None = None,
+        mvg: float = 0.85,
+        dx_list: list[torch.Tensor] | None = None,
+        velocity_list: list[torch.Tensor] | None = None,
+        original_latents: torch.Tensor | None = None,
         inverse: bool = False,
         callback_on_step_end: Callable[[int, int, dict], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],  # noqa: B006
     ):
+        if joint_attention_kwargs is None:
+            joint_attention_kwargs = {}
         image_seq_len = latents.shape[1]
         mu = calculate_shift(
             image_seq_len,
@@ -44,33 +50,44 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
             mu=mu,
         )
         num_warmup_steps = max(len(timesteps) - 1 - num_inference_steps * self.scheduler.order, 0)
-        using_inject_list = [True] * inject_step + [False] * (len(timesteps[:-1]) - inject_step)
+
         if inverse:
             timesteps = torch.flip(timesteps, [0])
-            using_inject_list = using_inject_list[::-1]
-
         dtype = latents.dtype
-
         if self.transformer.config.guidance_embeds:
             guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
             guidance = guidance.expand(latents.shape[0])
         else:
             guidance = None
 
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        if inverse:
+            dx_list = []
+            velocity_list = []
+
+        random_noise = torch.randn_like(latents)
+        with self.progress_bar(
+            total=num_inference_steps - start_timestep if inverse else num_inference_steps
+        ) as progress_bar:
             for step_idx, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:], strict=True)):
+                if inverse and num_inference_steps - step_idx == start_timestep:
+                    break
+                elif not inverse and step_idx < start_timestep:
+                    progress_bar.update()
+                    continue
+
                 sigma_curr = t_curr / self.scheduler.config.num_train_timesteps
                 sigma_prev = t_prev / self.scheduler.config.num_train_timesteps
 
-                joint_attention_kwargs["inverse"] = inverse
-                joint_attention_kwargs["editing_strategy"] = "replace_v"
-                joint_attention_kwargs["second_order"] = False
-                joint_attention_kwargs["inject"] = using_inject_list[step_idx]
-                joint_attention_kwargs["timestep"] = int(t_prev.item()) if inverse else int(t_curr.item())
+                if inverse:
+                    input_latents = (sigma_prev - sigma_curr) / (1 - sigma_curr) * (
+                        random_noise - latents
+                    ) + latents
+                else:
+                    input_latents = latents + dx_list[step_idx - start_timestep].to(dtype)
 
                 noise_pred = self.transformer(
-                    hidden_states=latents,
-                    timestep=sigma_curr.expand(latents.shape[0]).to(dtype),
+                    hidden_states=input_latents,
+                    timestep=(sigma_prev if inverse else sigma_curr).expand(input_latents.shape[0]).to(dtype),
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
@@ -80,7 +97,19 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
                     return_dict=False,
                 )[0].float()
 
-                latents = latents + (sigma_prev - sigma_curr) * noise_pred
+                if inverse:
+                    # input_latents: latents_prev, latents: latents_curr
+                    delta_v = (input_latents - latents) / (sigma_prev - sigma_curr) - noise_pred
+                    latents = input_latents - delta_v * (sigma_prev - sigma_curr)
+                    dx = delta_v * (sigma_prev - sigma_curr)
+                    dx_list.append(dx)
+                    velocity_list.append(noise_pred)
+                else:
+                    original_latents = original_latents + (sigma_prev - sigma_curr) * (
+                        noise_pred - velocity_list[step_idx - start_timestep]
+                    )
+                    velocity = noise_pred * mvg + (latents - original_latents) / sigma_curr * (1 - mvg)
+                    latents = latents + velocity * (sigma_prev - sigma_curr)
                 latents = latents.to(dtype)
 
                 if callback_on_step_end is not None:
@@ -98,6 +127,11 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
                 ):
                     progress_bar.update()
 
+        if inverse:
+            dx_list = dx_list[::-1]
+            velocity_list = velocity_list[::-1]
+            return latents, dx_list, velocity_list
+
         return latents
 
     @torch.inference_mode()
@@ -108,9 +142,11 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
         target_prompt: str | list[str],
         source_prompt_2: str | list[str] | None = None,
         target_prompt_2: str | list[str] | None = None,
-        inject_step: int = 6,
         num_inference_steps: int = 28,
-        guidance_scale: float = 2,
+        num_average_steps: int = 1,
+        source_guidance_scale: float = 1,
+        target_guidance_scale: float = 2.5,
+        start_timestep: int = 4,
         num_images_per_prompt: int | None = 1,
         latents: torch.FloatTensor | None = None,
         source_prompt_embeds: torch.FloatTensor | None = None,
@@ -123,13 +159,10 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
         joint_attention_kwargs: dict[str, Any] | None = None,
         height: int | None = None,
         width: int | None = None,
-        clear_memory: bool = True,
+        generator: torch.Generator | None = None,
         callback_on_step_end: Callable[[int, int, dict], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],  # noqa: B006
     ):
-        if not self.initialize_processor:
-            raise ValueError("Please call `add_processor` before running the pipeline.")
-
         if joint_attention_kwargs is None:
             joint_attention_kwargs = {}
 
@@ -152,21 +185,6 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
         source_img_latents, source_latent_image_ids, height, width, ori_height, ori_width = self.encode_img(
             source_img, source_prompt_embeds.dtype, target_size=target_size
         )
-        inverse_latents = self.denoise(
-            latents=source_img_latents,
-            pooled_prompt_embeds=source_pooled_prompt_embeds,
-            prompt_embeds=source_prompt_embeds,
-            text_ids=source_text_ids,
-            latent_image_ids=source_latent_image_ids,
-            guidance_scale=1,
-            inject_step=inject_step,
-            num_inference_steps=num_inference_steps,
-            device=device,
-            joint_attention_kwargs=joint_attention_kwargs,
-            inverse=True,
-            callback_on_step_end=callback_on_step_end,
-            callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
-        )
 
         (
             target_prompt_embeds,
@@ -182,26 +200,42 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
             max_sequence_length=max_sequence_length,
         )
 
+        inverse_latents, dx_list, velocity_list = self.denoise(
+            latents=source_img_latents,
+            pooled_prompt_embeds=source_pooled_prompt_embeds,
+            prompt_embeds=source_prompt_embeds,
+            text_ids=source_text_ids,
+            latent_image_ids=source_latent_image_ids,
+            guidance_scale=source_guidance_scale,
+            num_inference_steps=num_inference_steps,
+            start_timestep=start_timestep,
+            device=device,
+            joint_attention_kwargs=joint_attention_kwargs,
+            inverse=True,
+            callback_on_step_end=callback_on_step_end,
+            callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
+        )
+
         latents = self.denoise(
             latents=inverse_latents,
             pooled_prompt_embeds=target_pooled_prompt_embeds,
             prompt_embeds=target_prompt_embeds,
             text_ids=target_text_ids,
-            latent_image_ids=source_latent_image_ids,  # reuse the same image ids
-            guidance_scale=guidance_scale,
-            inject_step=inject_step,
+            latent_image_ids=source_latent_image_ids,
+            guidance_scale=target_guidance_scale,
             num_inference_steps=num_inference_steps,
+            start_timestep=start_timestep,
             device=device,
             joint_attention_kwargs=joint_attention_kwargs,
+            dx_list=dx_list,
+            velocity_list=velocity_list,
+            original_latents=source_img_latents,
             inverse=False,
             callback_on_step_end=callback_on_step_end,
             callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
         )
 
-        if clear_memory:
-            for processor in self.processors.values():
-                if hasattr(processor, "clear_memory"):
-                    processor.clear_memory()
+        del dx_list, velocity_list
 
         if output_type == "latent":
             image = latents
@@ -233,6 +267,7 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
         source_pooled_prompt_embeds: torch.FloatTensor | None = None,
         guidance_scale: float = 2,
         num_inference_steps: int = 28,
+        start_timestep: int = 4,
         joint_attention_kwargs: dict[str, Any] | None = None,
         max_sequence_length: int = 512,
         num_images_per_prompt: int | None = 1,
@@ -265,14 +300,14 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
         source_img_latents, source_latent_image_ids, height, width, ori_height, ori_width = self.encode_img(
             source_img, source_prompt_embeds.dtype, target_size=target_size
         )
-        inverse_latents = self.denoise(
+        inverse_latents, dx_list, velocity_list = self.denoise(
             latents=source_img_latents,
             pooled_prompt_embeds=source_pooled_prompt_embeds,
             prompt_embeds=source_prompt_embeds,
             text_ids=source_text_ids,
             latent_image_ids=source_latent_image_ids,
             guidance_scale=1,
-            inject_step=0,
+            start_timestep=start_timestep,
             num_inference_steps=num_inference_steps,
             device=device,
             joint_attention_kwargs=joint_attention_kwargs,
@@ -286,16 +321,21 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
             pooled_prompt_embeds=source_pooled_prompt_embeds,
             prompt_embeds=source_prompt_embeds,
             text_ids=source_text_ids,
-            latent_image_ids=source_latent_image_ids,  # reuse the same image ids
+            latent_image_ids=source_latent_image_ids,
             guidance_scale=guidance_scale,
-            inject_step=0,
+            start_timestep=start_timestep,
             num_inference_steps=num_inference_steps,
             device=device,
             joint_attention_kwargs=joint_attention_kwargs,
+            dx_list=dx_list,
+            velocity_list=velocity_list,
+            original_latents=source_img_latents,
             inverse=False,
             callback_on_step_end=callback_on_step_end,
             callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
         )
+
+        del dx_list, velocity_list
 
         if output_type == "latent":
             image = latents
@@ -322,9 +362,10 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
         source_img: np.ndarray | torch.Tensor,
         source_prompt: str | list[str],
         prompt_sequence: list[str | list[str]],
-        inject_step: int = 1,
-        num_inference_steps: int = 8,
-        guidance_scale: float = 2,
+        num_inference_steps: int = 28,
+        source_guidance_scale: float = 1,
+        target_guidance_scale: float = 2.5,
+        start_timestep: int = 4,
         joint_attention_kwargs: dict[str, Any] | None = None,
         max_sequence_length: int = 512,
         num_images_per_prompt: int | None = 1,
@@ -332,7 +373,6 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
         width: int | None = None,
         output_type: str | None = "pil",
         return_dict: bool = True,
-        clear_memory: bool = True,
         callback_on_step_end: Callable[[int, int, dict], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],  # noqa: B006
     ):
@@ -342,9 +382,10 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
                 source_img,
                 source_prompt,
                 target_prompt,
-                inject_step=inject_step,
                 num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
+                source_guidance_scale=source_guidance_scale,
+                target_guidance_scale=target_guidance_scale,
+                start_timestep=start_timestep,
                 joint_attention_kwargs=joint_attention_kwargs,
                 max_sequence_length=max_sequence_length,
                 num_images_per_prompt=num_images_per_prompt,
@@ -352,7 +393,6 @@ class RFVanillaFluxPipeline(RFEditingFluxPipeline):
                 width=width,
                 output_type=output_type,
                 return_dict=return_dict,
-                clear_memory=clear_memory,
                 callback_on_step_end=callback_on_step_end,
                 callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
             ).images[0]
