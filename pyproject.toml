@@ -1,7 +1,7 @@
 [project]
-name = "rf-inversion"
+name = "rectified-flow-image-editing"
 version = "0.1.0"
-description = "[TODO]"
+description = "A unified implementation of multiple Rectified Flow (RF)-based image editing approaches built upon the 🤗 Diffusers library."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
