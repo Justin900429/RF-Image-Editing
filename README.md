@@ -13,9 +13,9 @@ This repository includes several state-of-the-art RF-based editing methods, all 
 - [RF-Inversion](https://arxiv.org/abs/2410.10792) · *ICLR 2024*
 - [RF-Solver](https://arxiv.org/abs/2411.04746) · *ICML 2025*
 - [FireFlow](https://arxiv.org/abs/2412.07517) · *ICML 2025*
-- [FTEdit](https://arxiv.org/abs/2412.07517) · *CVPR 2025*
+- [FTEdit](https://arxiv.org/abs/2411.15843) · *CVPR 2025*
 - [FlowEdit](https://arxiv.org/abs/2412.08629) · *ICCV 2025*
-- [MultiTurn](https://arxiv.org/abs/2505.04320) · *ICCV 2025*
+- [Multi-Turn](https://arxiv.org/abs/2505.04320) · *ICCV 2025*
 - [DNAEdit](https://arxiv.org/abs/2506.01430) · *NeurIPS 2025*
 
 In addition, we provide two auxiliary functions, **reconstruction** and **multi-turn editing**, to enhance usability and evaluation:
