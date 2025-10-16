@@ -246,7 +246,7 @@ The example below demonstrates how each approach performs across multiple sequen
 | **FireFlow**     | ![fireflow_result](./assets/results/multi_turn/FireFlow.jpg) |
 | **FTEdit**       | ![ftedit_result](./assets/results/multi_turn/FTEdit.jpg) |
 | **FlowEdit**     | ![flowedit_result](./assets/results/multi_turn/FlowEdit.jpg) |
-| **MultiTurn** | ![multiturn_result](./assets/results/multi_turn/MultiTurn.jpg) |
+| **Multi-Turn** | ![multiturn_result](./assets/results/multi_turn/MultiTurn.jpg) |
 | **DNAEdit**      | ![dnaedit_result](./assets/results/multi_turn/DNAEdit.jpg) |
 
 ---
@@ -339,7 +339,7 @@ If you find this repository useful for your research or applications, please con
 </details>
 
 <details>
-<summary>MultiTurn</summary>
+<summary>Multi-Turn</summary>
 
 ```bibtex
 @inproceedings{zhou2025multi,
