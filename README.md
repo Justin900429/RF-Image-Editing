@@ -339,7 +339,7 @@ If you find this repository useful for your research or applications, please con
 </details>
 
 <details>
-<summary>Multi-Turn</summary>
+<summary>MultiTurn</summary>
 
 ```bibtex
 @inproceedings{zhou2025multi,
